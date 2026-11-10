@@ -20,4 +20,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build frontend container
-        run: docker build -f Dockerfile -t flashrush-web frontend
+        run: docker build -f frontend/Dockerfile -t flashrush-web frontend
+     

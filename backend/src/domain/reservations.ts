@@ -1,3 +1,4 @@
+
 import type { Pool, PoolClient } from 'pg'
 import { AppError, invalidQuantity, purchaseLimitExceeded, reservationNotFound, saleNotActive, saleNotFound, soldOut } from '../errors'
 import { hashRequest, runIdempotent } from './idempotency'
@@ -68,11 +69,13 @@ export async function lockReservation(client: PoolClient, id: string): Promise<L
 }
 
 export async function releaseHold(client: PoolClient, saleId: string, quantity: number): Promise<void> {
-  const result = await client.query('UPDATE sales SET reserved = reserved - $2, updated_at = now() WHERE id = $1 AND reserved >= $2', [
-    saleId,
-    quantity
-  ])
-  if (result.rowCount !== 1) throw new Error(`inventory invariant violated while releasing ${quantity} units of sale ${saleId}`)
+  const result = await client.query(
+    'UPDATE sales SET reserved = reserved - $2, updated_at = now() WHERE id = $1 AND reserved >= $2',
+    [saleId, quantity]
+  )
+  if (result.rowCount !== 1) {
+    throw new Error(`inventory invariant violated while releasing ${quantity} units of sale ${saleId}`)
+  }
 }
 
 async function explainRejection(client: PoolClient, saleId: string): Promise<AppError> {
@@ -86,23 +89,46 @@ async function explainRejection(client: PoolClient, saleId: string): Promise<App
 
 export function reserve(pool: Pool, input: ReserveInput) {
   const requestHash = hashRequest({ saleId: input.saleId, quantity: input.quantity })
-  const params = { sessionId: input.sessionId, scope: 'reserve' as const, key: input.idempotencyKey, requestHash }
-  return runIdempotent<{ data: ReservationView }>(pool, params, async (client) => {
-    const limits = await client.query<{ max_per_session: number }>('SELECT max_per_session FROM sales WHERE id = $1', [input.saleId])
-    if (limits.rows.length === 0) throw saleNotFound()
-    const maxPerSession = limits.rows[0].max_per_session
-    if (input.quantity < 1 || input.quantity > maxPerSession) throw invalidQuantity(maxPerSession)
+  const params = {
+    sessionId: input.sessionId,
+    scope: 'reserve' as const,
+    key: input.idempotencyKey,
+    requestHash
+  }
 
-    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${input.sessionId}:${input.saleId}`])
+  return runIdempotent<{ data: ReservationView }>(pool, params, async (client) => {
+    const limits = await client.query<{ max_per_session: number }>(
+      'SELECT max_per_session FROM sales WHERE id = $1',
+      [input.saleId]
+    )
+
+    if (limits.rows.length === 0) throw saleNotFound()
+
+    const maxPerSession = limits.rows[0].max_per_session
+    if (input.quantity < 1 || input.quantity > maxPerSession) {
+      throw invalidQuantity(maxPerSession)
+    }
+
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+      `${input.sessionId}:${input.saleId}`
+    ])
+
     const held = await client.query<{ held: number }>(
-      `SELECT COALESCE(SUM(quantity), 0)::int AS held FROM reservations
-       WHERE sale_id = $1 AND session_id = $2 AND status IN ('RESERVED', 'CONFIRMED')`,
+      `SELECT COALESCE(SUM(quantity), 0)::int AS held
+       FROM reservations
+       WHERE sale_id = $1
+         AND session_id = $2
+         AND status IN ('RESERVED', 'CONFIRMED')`,
       [input.saleId, input.sessionId]
     )
-    if (held.rows[0].held + input.quantity > maxPerSession) throw purchaseLimitExceeded(maxPerSession)
+
+    if (held.rows[0].held + input.quantity > maxPerSession) {
+      throw purchaseLimitExceeded(maxPerSession)
+    }
 
     const updated = await client.query<{ price_minor: number; hold_seconds: number }>(
-      `UPDATE sales SET reserved = reserved + $2, updated_at = now()
+      `UPDATE sales
+       SET reserved = reserved + $2, updated_at = now()
        WHERE id = $1
          AND starts_at <= clock_timestamp()
          AND ends_at > clock_timestamp()
@@ -110,28 +136,65 @@ export function reserve(pool: Pool, input: ReserveInput) {
        RETURNING price_minor, hold_seconds`,
       [input.saleId, input.quantity]
     )
-    if (updated.rowCount === 0) throw await explainRejection(client, input.saleId)
+
+    if (updated.rowCount === 0) {
+      throw await explainRejection(client, input.saleId)
+    }
 
     const { price_minor: priceMinor, hold_seconds: holdSeconds } = updated.rows[0]
+
     const inserted = await client.query<ReservationRow>(
-      `INSERT INTO reservations (sale_id, session_id, quantity, unit_price_minor, expires_at)
-       VALUES ($1, $2, $3, $4, clock_timestamp() + make_interval(secs => $5::int))
+      `INSERT INTO reservations (
+         sale_id,
+         session_id,
+         quantity,
+         unit_price_minor,
+         expires_at
+       )
+       VALUES (
+         $1,
+         $2,
+         $3,
+         $4,
+         clock_timestamp() + make_interval(secs => $5::int)
+       )
        RETURNING *`,
       [input.saleId, input.sessionId, input.quantity, priceMinor, holdSeconds]
     )
+
     const reservation = inserted.rows[0]
+
     await client.query(
       `INSERT INTO outbox (topic, dedupe_key, payload, available_at)
-       VALUES ('reservation.expire', $1, $2::jsonb, $3)`,
-      [`expire-${reservation.id}`, JSON.stringify({ reservationId: reservation.id }), reservation.expires_at]
+       SELECT
+         'reservation.expire',
+         $1,
+         $2::jsonb,
+         expires_at
+       FROM reservations
+       WHERE id = $3`,
+      [
+        `expire-${reservation.id}`,
+        JSON.stringify({ reservationId: reservation.id }),
+        reservation.id
+      ]
     )
-    return { status: 201, body: { data: toReservationView(reservation) } }
+
+    return {
+      status: 201,
+      body: { data: toReservationView(reservation) }
+    }
   })
 }
 
 export async function getReservation(pool: Pool, sessionId: string, id: string): Promise<ReservationView> {
-  const { rows } = await pool.query<ReservationRow>('SELECT * FROM reservations WHERE id = $1 AND session_id = $2', [id, sessionId])
+  const { rows } = await pool.query<ReservationRow>(
+    'SELECT * FROM reservations WHERE id = $1 AND session_id = $2',
+    [id, sessionId]
+  )
+
   if (rows.length === 0) throw reservationNotFound()
+
   return toReservationView(rows[0])
 }
 
@@ -145,8 +208,13 @@ interface BookingRow extends ReservationRow {
 
 export async function listBookings(pool: Pool, sessionId: string): Promise<BookingView[]> {
   const { rows } = await pool.query<BookingRow>(
-    `SELECT r.*, s.name AS sale_name, o.id AS order_id, o.total_minor AS order_total_minor,
-            o.payment_status AS order_payment_status, o.created_at AS order_created_at
+    `SELECT
+       r.*,
+       s.name AS sale_name,
+       o.id AS order_id,
+       o.total_minor AS order_total_minor,
+       o.payment_status AS order_payment_status,
+       o.created_at AS order_created_at
      FROM reservations r
      JOIN sales s ON s.id = r.sale_id
      LEFT JOIN orders o ON o.reservation_id = r.id
@@ -155,6 +223,7 @@ export async function listBookings(pool: Pool, sessionId: string): Promise<Booki
      LIMIT 100`,
     [sessionId]
   )
+
   return rows.map((row) => ({
     reservation: toReservationView(row),
     saleName: row.sale_name,
