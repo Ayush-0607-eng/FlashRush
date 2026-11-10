@@ -1,0 +1,172 @@
+name: flashrush
+
+x-backend-build: &backend-build
+  context: .
+  dockerfile: backend/Dockerfile
+  target: runtime
+
+x-backend-env: &backend-env
+  NODE_ENV: ${NODE_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_URL: postgres://flashrush:${POSTGRES_PASSWORD:-}@postgres:5432/flashrush
+  REDIS_URL: redis://redis:6379
+  SESSION_SECRET: ${SESSION_SECRET:-}
+  ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+  ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:18473}
+  COOKIE_SAMESITE: ${COOKIE_SAMESITE:-lax}
+  COOKIE_SECURE: ${COOKIE_SECURE:-}
+  SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-168}
+  TRUST_PROXY: ${TRUST_PROXY:-0}
+  RATE_LIMIT_READ_CAPACITY: ${RATE_LIMIT_READ_CAPACITY:-120}
+  RATE_LIMIT_READ_REFILL_PER_SEC: ${RATE_LIMIT_READ_REFILL_PER_SEC:-60}
+  RATE_LIMIT_BOOK_CAPACITY: ${RATE_LIMIT_BOOK_CAPACITY:-30}
+  RATE_LIMIT_BOOK_REFILL_PER_SEC: ${RATE_LIMIT_BOOK_REFILL_PER_SEC:-10}
+  RATE_LIMIT_FAIL_MODE: ${RATE_LIMIT_FAIL_MODE:-open}
+  OUTBOX_POLL_MS: ${OUTBOX_POLL_MS:-1000}
+  OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-100}
+  EXPIRY_SWEEP_INTERVAL_MS: ${EXPIRY_SWEEP_INTERVAL_MS:-2000}
+  RECONCILE_INTERVAL_MS: ${RECONCILE_INTERVAL_MS:-60000}
+  HEARTBEAT_INTERVAL_MS: ${HEARTBEAT_INTERVAL_MS:-5000}
+  DB_POOL_MAX: ${DB_POOL_MAX:-20}
+
+services:
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${WEB_HOST_PORT:-18473}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: flashrush
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: flashrush
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-15439}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flashrush -d flashrush"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-16391}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: *backend-build
+    image: flashrush-backend
+    restart: "no"
+    command: ["node", "dist/migrate-cli.js"]
+    environment:
+      DATABASE_URL: postgres://flashrush:${POSTGRES_PASSWORD:-}@postgres:5432/flashrush
+      MIGRATIONS_DIR: /app/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: *backend-build
+    image: flashrush-backend
+    restart: unless-stopped
+    command: ["node", "dist/server.js"]
+    environment:
+      <<: *backend-env
+      PORT: "4000"
+    ports:
+      - "${API_HOST_PORT:-18491}:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/api/v1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    stop_grace_period: 15s
+
+  worker:
+    build: *backend-build
+    image: flashrush-backend
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    environment:
+      <<: *backend-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    stop_grace_period: 20s
+
+  postgres-test:
+    image: postgres:16-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: flashrush_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    command: ["postgres", "-c", "fsync=off", "-c", "max_connections=200"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d flashrush_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis-test:
+    image: redis:7-alpine
+    profiles: ["test"]
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  test:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: dev
+    profiles: ["test"]
+    environment:
+      NODE_ENV: test
+      TEST_DATABASE_URL: postgres://test:test@postgres-test:5432/flashrush_test
+      TEST_REDIS_URL: redis://redis-test:6379
+      MIGRATIONS_DIR: /app/migrations
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+    command: ["npm", "test"]
+
+volumes:
+  postgres_data:
+  redis_data:

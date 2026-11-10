@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Type check
+        run: docker compose --profile test run --rm test npm run typecheck
+      - name: Test against real PostgreSQL and Redis
+        run: docker compose --profile test run --rm test
+      - name: Build runtime image
+        run: docker build -f backend/Dockerfile --target runtime -t flashrush-backend .
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build frontend container
+        run: docker build -f Dockerfile -t flashrush-web frontend

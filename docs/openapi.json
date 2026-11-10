@@ -1,0 +1,620 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "FlashRush API",
+    "version": "1.0.0",
+    "description": "Flash-sale booking API. PostgreSQL owns inventory; Redis supports rate limiting and BullMQ expiry delivery. Payment outcomes are simulated."
+  },
+  "servers": [
+    {
+      "url": "/api/v1",
+      "description": "Same-origin Docker deployment"
+    }
+  ],
+  "tags": [
+    {
+      "name": "System"
+    },
+    {
+      "name": "Sales"
+    },
+    {
+      "name": "Reservations"
+    },
+    {
+      "name": "Bookings"
+    },
+    {
+      "name": "Admin"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Liveness probe",
+        "responses": {
+          "200": {
+            "description": "Process is alive"
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Dependency readiness",
+        "responses": {
+          "200": {
+            "description": "PostgreSQL and Redis are ready or degraded"
+          },
+          "503": {
+            "description": "PostgreSQL unavailable"
+          }
+        }
+      }
+    },
+    "/session": {
+      "post": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Create anonymous browser session",
+        "responses": {
+          "201": {
+            "description": "Session cookie created"
+          },
+          "200": {
+            "description": "Session already exists"
+          }
+        }
+      }
+    },
+    "/sales": {
+      "get": {
+        "tags": [
+          "Sales"
+        ],
+        "summary": "List active and scheduled sales",
+        "responses": {
+          "200": {
+            "description": "Sale list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Sale"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sales/{id}": {
+      "get": {
+        "tags": [
+          "Sales"
+        ],
+        "summary": "Get sale details",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sale details"
+          },
+          "404": {
+            "description": "Sale not found"
+          }
+        }
+      }
+    },
+    "/sales/{id}/reservations": {
+      "post": {
+        "tags": [
+          "Reservations"
+        ],
+        "summary": "Hold tickets",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "quantity"
+                ],
+                "properties": {
+                  "quantity": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Reservation created"
+          },
+          "409": {
+            "description": "Sold out or purchase limit reached"
+          },
+          "422": {
+            "description": "Validation or idempotency conflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/reservations/{id}": {
+      "get": {
+        "tags": [
+          "Reservations"
+        ],
+        "summary": "Get reservation status",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reservation status"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/reservations/{id}/checkout": {
+      "post": {
+        "tags": [
+          "Reservations"
+        ],
+        "summary": "Complete simulated checkout",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "outcome"
+                ],
+                "properties": {
+                  "outcome": {
+                    "type": "string",
+                    "enum": [
+                      "success",
+                      "fail"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Order confirmed"
+          },
+          "402": {
+            "description": "Simulated payment declined"
+          },
+          "410": {
+            "description": "Reservation expired"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/reservations/{id}/cancel": {
+      "post": {
+        "tags": [
+          "Reservations"
+        ],
+        "summary": "Cancel a held reservation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reservation cancelled"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/bookings": {
+      "get": {
+        "tags": [
+          "Bookings"
+        ],
+        "summary": "List this session's booking history",
+        "responses": {
+          "200": {
+            "description": "Booking history"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Process and database metrics",
+        "responses": {
+          "200": {
+            "description": "Metrics snapshot"
+          }
+        }
+      }
+    },
+    "/worker/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Worker heartbeat",
+        "responses": {
+          "200": {
+            "description": "Worker alive"
+          },
+          "503": {
+            "description": "Worker heartbeat stale"
+          }
+        }
+      }
+    },
+    "/admin/sales": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Create sale",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminToken"
+          },
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSale"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Sale created"
+          },
+          "401": {
+            "description": "Admin token rejected"
+          },
+          "503": {
+            "description": "Admin API disabled"
+          }
+        }
+      }
+    },
+    "/admin/reconcile": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Run inventory reconciliation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminToken"
+          },
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "repair": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reconciliation report"
+          }
+        }
+      }
+    },
+    "/admin/sales/{id}": {
+      "patch": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Update sale fields",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/AdminToken"
+          },
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Partial sale fields; only supplied properties are updated",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "priceMinor": {
+                    "type": "integer"
+                  },
+                  "total": {
+                    "type": "integer"
+                  },
+                  "maxPerSession": {
+                    "type": "integer"
+                  },
+                  "holdSeconds": {
+                    "type": "integer"
+                  },
+                  "startsAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "endsAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sale updated"
+          },
+          "404": {
+            "description": "Sale not found"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Id": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128
+        }
+      },
+      "Csrf": {
+        "name": "X-Requested-With",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "flashrush"
+          ]
+        }
+      },
+      "AdminToken": {
+        "name": "X-Admin-Token",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "schemas": {
+      "Sale": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "priceMinor": {
+            "type": "integer",
+            "description": "Price in minor currency units"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "reserved": {
+            "type": "integer"
+          },
+          "sold": {
+            "type": "integer"
+          },
+          "available": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "SCHEDULED",
+              "ACTIVE",
+              "SOLD_OUT",
+              "ENDED"
+            ]
+          },
+          "startsAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endsAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CreateSale": {
+        "type": "object",
+        "required": [
+          "name",
+          "priceMinor",
+          "total",
+          "startsAt",
+          "endsAt"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "description": {
+            "type": "string"
+          },
+          "priceMinor": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxPerSession": {
+            "type": "integer",
+            "default": 4
+          },
+          "holdSeconds": {
+            "type": "integer",
+            "default": 300
+          },
+          "startsAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endsAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "flashrush_session",
+        "description": "HTTP-only anonymous session cookie created by POST /session."
+      }
+    }
+  }
+}
